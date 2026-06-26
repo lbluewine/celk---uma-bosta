@@ -1,0 +1,718 @@
+// ==UserScript==
+// @name         Celk - Auto Justificativa e Lote
+// @namespace    http://tampermonkey.net/
+// @version      1.4
+// @description  Preenche justificativa automaticamente e tenta selecionar lote padrão
+// @author       Você
+// @match        https://criciuma.celk.com.br/*
+// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ==========================================
+    // CONFIGURAÇÕES
+    // ==========================================
+
+    const JUSTIFICATIVA_PADRAO = "erro de estoque";
+    const AUTO_CONFIRMAR_JUSTIFICATIVA = true;
+    const DELAY_CONFIRMAR_MS = 0;
+
+    const CELK_LOTE_PADRAO_KEY = "celk_lote_padrao_global";
+    const CELK_LOTES_SALVOS_KEY = "celk_lotes_salvos_global";
+    const AUTO_SELECIONAR_LOTE_PADRAO = true;
+
+    let autoSelecionandoLote = false;
+    let ultimaTentativaAutoLote = 0;
+    let ultimaChaveTentativaAutoLote = "";
+
+    // ==========================================
+    // CSS
+    // ==========================================
+
+    const styleAutoCelk = document.createElement("style");
+
+    styleAutoCelk.textContent = `
+        .wicket-modal:has(textarea[name*="justificatica"]),
+        .wicket-modal:has(textarea[wicketpath*="justificatica"]),
+        .wicket-modal:has(textarea[name*="justificativa"]),
+        .wicket-modal:has(textarea[wicketpath*="justificativa"]),
+        .wicket-modal[data-auto-justificativa-estado="processando"],
+        .wicket-modal[data-auto-justificativa-estado="confirmado"] {
+            opacity: 0 !important;
+            pointer-events: none !important;
+            transition: none !important;
+        }
+
+        .celk-lote-padrao-box {
+            display: flex !important;
+            flex-wrap: wrap !important;
+            align-items: center !important;
+            gap: 4px !important;
+            margin-top: 4px !important;
+            max-width: 280px !important;
+        }
+
+        .celk-lote-btn {
+            font-size: 11px !important;
+            padding: 3px 8px !important;
+            cursor: pointer !important;
+            border-radius: 4px !important;
+            border: 1px solid #999 !important;
+            background: #eeeeee !important;
+            color: #222222 !important;
+            font-weight: normal !important;
+            line-height: 1.2 !important;
+        }
+
+        .celk-lote-btn:hover {
+            background: #dddddd !important;
+        }
+
+        .celk-lote-btn.celk-lote-ativo {
+            border: 1px solid #1b5e20 !important;
+            background: #2e7d32 !important;
+            color: #ffffff !important;
+            font-weight: bold !important;
+        }
+
+        .celk-lote-btn.celk-lote-ativo:hover {
+            background: #256628 !important;
+        }
+
+        .celk-lote-remover {
+            font-size: 11px !important;
+            padding: 3px 6px !important;
+            cursor: pointer !important;
+            border-radius: 4px !important;
+            border: 1px solid #999 !important;
+            background: #f5f5f5 !important;
+            color: #555555 !important;
+            line-height: 1.2 !important;
+        }
+
+        .celk-lote-remover:hover {
+            background: #e0e0e0 !important;
+        }
+    `;
+
+    document.documentElement.appendChild(styleAutoCelk);
+
+    // ==========================================
+    // FUNÇÕES GERAIS
+    // ==========================================
+
+    function atualizarStatus(texto) {
+        console.log("[Celk Script]", texto);
+    }
+
+    function normalizarTexto(txt) {
+        return String(txt || "")
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .trim()
+            .toUpperCase();
+    }
+
+    function elementoVisivel(el) {
+        if (!el) return false;
+
+        const style = window.getComputedStyle(el);
+
+        return (
+            style.display !== "none" &&
+            style.visibility !== "hidden"
+        );
+    }
+
+    function clicarElemento(el) {
+        if (!el) return;
+
+        el.focus?.();
+
+        const opts = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            button: 0
+        };
+
+        el.dispatchEvent(new MouseEvent("mouseover", opts));
+        el.dispatchEvent(new MouseEvent("mousedown", opts));
+        el.dispatchEvent(new MouseEvent("mouseup", opts));
+        el.dispatchEvent(new MouseEvent("click", opts));
+    }
+
+    function esconderModalVisualmente(modal) {
+        if (!modal) return;
+
+        modal.style.setProperty("opacity", "0", "important");
+        modal.style.setProperty("pointer-events", "none", "important");
+        modal.style.setProperty("transition", "none", "important");
+    }
+
+    // ==========================================
+    // AUTO-JUSTIFICATIVA DE LOTE
+    // ==========================================
+
+    function definirValorTextarea(textarea, valor) {
+        textarea.focus();
+
+        const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype,
+            "value"
+        ).set;
+
+        setter.call(textarea, valor);
+
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        textarea.dispatchEvent(new Event("change", { bubbles: true }));
+
+        textarea.dispatchEvent(new KeyboardEvent("keyup", {
+            bubbles: true,
+            key: "o",
+            code: "KeyO",
+            keyCode: 79,
+            which: 79
+        }));
+    }
+
+    function encontrarModalJustificativaLote() {
+        const textarea = document.querySelector(
+            'textarea[name*="justificatica"], ' +
+            'textarea[wicketpath*="justificatica"], ' +
+            'textarea[name*="justificativa"], ' +
+            'textarea[wicketpath*="justificativa"]'
+        );
+
+        if (!textarea || !elementoVisivel(textarea)) {
+            return null;
+        }
+
+        const modal =
+            textarea.closest(".wicket-modal") ||
+            textarea.closest('[role="dialog"]') ||
+            textarea.closest("form") ||
+            document.body;
+
+        const textoModal = modal.textContent.toLowerCase();
+
+        const pareceSerModalCorreto =
+            textoModal.includes("justificativa") ||
+            textoModal.includes("lote é diferente") ||
+            textoModal.includes("lote e diferente") ||
+            textarea.name.toLowerCase().includes("justificatica") ||
+            textarea.getAttribute("wicketpath")?.toLowerCase().includes("justificatica");
+
+        if (!pareceSerModalCorreto) {
+            return null;
+        }
+
+        const botaoConfirmar =
+            modal.querySelector('input[type="button"][value="Confirmar"]') ||
+            modal.querySelector('input.checkmark[value="Confirmar"]') ||
+            modal.querySelector('input[value="Confirmar"]') ||
+            document.querySelector('input[type="button"][value="Confirmar"]');
+
+        if (!botaoConfirmar || !elementoVisivel(botaoConfirmar)) {
+            return null;
+        }
+
+        return {
+            modal,
+            textarea,
+            botaoConfirmar
+        };
+    }
+
+    function processarModalJustificativaLote() {
+        const encontrado = encontrarModalJustificativaLote();
+
+        if (!encontrado) {
+            return;
+        }
+
+        const { modal, textarea, botaoConfirmar } = encontrado;
+
+        if (modal.dataset.autoJustificativaEstado === "processando") return;
+        if (modal.dataset.autoJustificativaEstado === "confirmado") return;
+
+        modal.dataset.autoJustificativaEstado = "processando";
+        esconderModalVisualmente(modal);
+
+        atualizarStatus("Modal encontrado. Preenchendo justificativa...");
+
+        definirValorTextarea(textarea, JUSTIFICATIVA_PADRAO);
+
+        if (!AUTO_CONFIRMAR_JUSTIFICATIVA) {
+            modal.dataset.autoJustificativaEstado = "preenchido";
+            atualizarStatus("Justificativa preenchida. Confirmação manual.");
+            return;
+        }
+
+        setTimeout(() => {
+            if (!document.body.contains(textarea)) return;
+            if (!document.body.contains(botaoConfirmar)) return;
+
+            if (textarea.value.trim() !== JUSTIFICATIVA_PADRAO) {
+                definirValorTextarea(textarea, JUSTIFICATIVA_PADRAO);
+            }
+
+            atualizarStatus("Confirmando justificativa...");
+
+            modal.dataset.autoJustificativaEstado = "confirmado";
+
+            botaoConfirmar.focus();
+            botaoConfirmar.click();
+        }, DELAY_CONFIRMAR_MS);
+    }
+
+    // ==========================================
+    // LOTE PADRÃO
+    // ==========================================
+
+    function obterLotePadrao() {
+        return localStorage.getItem(CELK_LOTE_PADRAO_KEY) || "";
+    }
+
+    function definirLotePadrao(lote) {
+        lote = String(lote || "").trim().toUpperCase();
+
+        if (!lote) {
+            return;
+        }
+
+        localStorage.setItem(CELK_LOTE_PADRAO_KEY, lote);
+        adicionarLoteSalvo(lote);
+
+        atualizarStatus("Lote padrão definido: " + lote);
+
+        atualizarPainelLotePadrao();
+    }
+
+    function obterLotesSalvos() {
+        try {
+            const raw = localStorage.getItem(CELK_LOTES_SALVOS_KEY);
+            const lista = JSON.parse(raw || "[]");
+
+            if (!Array.isArray(lista)) {
+                return [];
+            }
+
+            return lista
+                .map(lote => String(lote || "").trim().toUpperCase())
+                .filter(Boolean);
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function salvarLotesSalvos(lista) {
+        const limpa = [
+            ...new Set(
+                lista
+                    .map(lote => String(lote || "").trim().toUpperCase())
+                    .filter(Boolean)
+            )
+        ];
+
+        localStorage.setItem(CELK_LOTES_SALVOS_KEY, JSON.stringify(limpa));
+    }
+
+    function adicionarLoteSalvo(lote) {
+        lote = String(lote || "").trim().toUpperCase();
+
+        if (!lote) {
+            return;
+        }
+
+        const lista = obterLotesSalvos();
+
+        if (!lista.includes(lote)) {
+            lista.push(lote);
+            salvarLotesSalvos(lista);
+        }
+    }
+
+    function removerLoteSalvo(lote) {
+        lote = String(lote || "").trim().toUpperCase();
+
+        const lista = obterLotesSalvos().filter(item => item !== lote);
+
+        salvarLotesSalvos(lista);
+
+        if (normalizarTexto(obterLotePadrao()) === normalizarTexto(lote)) {
+            localStorage.removeItem(CELK_LOTE_PADRAO_KEY);
+        }
+
+        atualizarStatus("Lote removido: " + lote);
+
+        atualizarPainelLotePadrao();
+    }
+
+    function encontrarCampoLote() {
+        return document.querySelector(
+            'input[wicketpath*="pnlSaidaLote_lote"], ' +
+            'input[name*="pnlSaidaLote:lote"]'
+        );
+    }
+
+    function encontrarBotaoListaLotes(campoLote) {
+        const container =
+            campoLote?.closest(".span-6") ||
+            campoLote?.parentElement ||
+            document;
+
+        return (
+            container.querySelector('a[wicketpath*="btnLotes"]') ||
+            container.querySelector("a.icon.notepad") ||
+            document.querySelector('a[wicketpath*="pnlSaidaLote_btnLotes"]') ||
+            document.querySelector('a[wicketpath*="btnLotes"]')
+        );
+    }
+
+    function criarBotaoLote(lote, ativo) {
+        const btn = document.createElement("button");
+
+        btn.type = "button";
+        btn.textContent = lote;
+        btn.title = "Usar lote " + lote + " como padrão";
+        btn.className = "celk-lote-btn";
+
+        if (ativo) {
+            btn.classList.add("celk-lote-ativo");
+        }
+
+        btn.addEventListener("click", () => {
+            definirLotePadrao(lote);
+        });
+
+        return btn;
+    }
+
+    function criarBotaoRemoverLote(lote) {
+        const btn = document.createElement("button");
+
+        btn.type = "button";
+        btn.textContent = "×";
+        btn.title = "Remover lote padrão/salvo";
+        btn.className = "celk-lote-remover";
+
+        btn.addEventListener("click", event => {
+            event.stopPropagation();
+            removerLoteSalvo(lote);
+        });
+
+        return btn;
+    }
+
+    function atualizarPainelLotePadrao() {
+        const campoLote = encontrarCampoLote();
+
+        if (!campoLote) {
+            return;
+        }
+
+        const container =
+            campoLote.closest(".span-6") ||
+            campoLote.parentElement;
+
+        if (!container) {
+            return;
+        }
+
+        let box = container.querySelector(".celk-lote-padrao-box");
+
+        if (!box) {
+            box = document.createElement("div");
+            box.className = "celk-lote-padrao-box";
+            container.appendChild(box);
+        }
+
+        const loteAtual = String(campoLote.value || "").trim().toUpperCase();
+        const lotePadrao = obterLotePadrao();
+
+        const lotes = obterLotesSalvos();
+
+        if (loteAtual && !lotes.includes(loteAtual)) {
+            lotes.unshift(loteAtual);
+        }
+
+        const chaveRender = JSON.stringify({
+            loteAtual,
+            lotePadrao,
+            lotes
+        });
+
+        if (box.dataset.renderKey === chaveRender) {
+            return;
+        }
+
+        box.dataset.renderKey = chaveRender;
+        box.innerHTML = "";
+
+        if (lotes.length === 0) {
+            return;
+        }
+
+        for (const lote of lotes) {
+            const ativo = normalizarTexto(lote) === normalizarTexto(lotePadrao);
+
+            const btnLote = criarBotaoLote(lote, ativo);
+            box.appendChild(btnLote);
+
+            if (ativo) {
+                const btnRemover = criarBotaoRemoverLote(lote);
+                box.appendChild(btnRemover);
+            }
+        }
+    }
+
+    // ==========================================
+    // AUTO-SELECIONAR LOTE NA LISTA
+    // ==========================================
+
+    function encontrarModalLotesAberto() {
+        const modais = [
+            ...document.querySelectorAll(".wicket-modal, [role='dialog']")
+        ].filter(elementoVisivel);
+
+        for (const modal of modais) {
+            const titulo = modal.querySelector(".w_captionText, h3");
+            const textoTitulo = normalizarTexto(titulo ? titulo.textContent : "");
+            const textoModal = normalizarTexto(modal.textContent);
+
+            if (
+                textoTitulo === "LOTES" ||
+                textoModal.includes("DT. VALIDADE") ||
+                textoModal.includes("DISPONIVEL") ||
+                textoModal.includes("FABRICANTE")
+            ) {
+                return modal;
+            }
+        }
+
+        return null;
+    }
+
+    function encontrarLinhaDoLote(lotePadrao) {
+        const loteNormalizado = normalizarTexto(lotePadrao);
+        const modalLotes = encontrarModalLotesAberto();
+
+        if (!modalLotes) {
+            return null;
+        }
+
+        const linhas = [
+            ...modalLotes.querySelectorAll(
+                'tbody[wicketpath*="dlgSaidaLote_content_table_table_body"] tr, ' +
+                'table.dataTable tbody tr, ' +
+                'tbody tr'
+            )
+        ].filter(elementoVisivel);
+
+        for (const linha of linhas) {
+            const celulas = [...linha.querySelectorAll("td")];
+
+            if (celulas.length === 0) {
+                continue;
+            }
+
+            const primeiraCelula = celulas[0];
+            const loteLinha = normalizarTexto(primeiraCelula.textContent);
+
+            if (loteLinha === loteNormalizado) {
+                return linha;
+            }
+        }
+
+        return null;
+    }
+
+
+    function selecionarLinhaDeLote(linha) {
+        if (!linha) {
+            return false;
+        }
+
+        const primeiraCelula =
+              linha.querySelector("td:first-child div") ||
+              linha.querySelector("td:first-child") ||
+              linha;
+
+        const opts = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            button: 0
+        };
+
+        primeiraCelula.scrollIntoView({
+            block: "center",
+            inline: "center"
+        });
+
+        primeiraCelula.dispatchEvent(new MouseEvent("mouseover", opts));
+        primeiraCelula.dispatchEvent(new MouseEvent("mousedown", opts));
+        primeiraCelula.dispatchEvent(new MouseEvent("mouseup", opts));
+        primeiraCelula.dispatchEvent(new MouseEvent("click", opts));
+
+        linha.dispatchEvent(new MouseEvent("mouseover", opts));
+        linha.dispatchEvent(new MouseEvent("mousedown", opts));
+        linha.dispatchEvent(new MouseEvent("mouseup", opts));
+        linha.dispatchEvent(new MouseEvent("click", opts));
+
+        setTimeout(() => {
+            primeiraCelula.dispatchEvent(new MouseEvent("dblclick", opts));
+            linha.dispatchEvent(new MouseEvent("dblclick", opts));
+        }, 50);
+
+        return true;
+    }
+
+    function esperarESelecionarLote(lotePadrao, tentativas = 60) {
+        return new Promise(resolve => {
+            let tentativaAtual = 0;
+
+            const timer = setInterval(() => {
+                tentativaAtual++;
+
+                const modalLotes = encontrarModalLotesAberto();
+
+                if (!modalLotes) {
+                    if (tentativaAtual >= tentativas) {
+                        clearInterval(timer);
+                        atualizarStatus("Janela de lotes não abriu.");
+                        resolve(false);
+                    }
+
+                    return;
+                }
+
+                const linha = encontrarLinhaDoLote(lotePadrao);
+
+                if (linha) {
+                    clearInterval(timer);
+
+                    atualizarStatus("Lote encontrado na lista: " + lotePadrao);
+
+                    const ok = selecionarLinhaDeLote(linha);
+
+                    resolve(ok);
+                    return;
+                }
+
+                if (tentativaAtual >= tentativas) {
+                    clearInterval(timer);
+
+                    atualizarStatus("Lote padrão não encontrado na lista: " + lotePadrao);
+
+                    resolve(false);
+                }
+            }, 50);
+        });
+    }
+
+    async function tentarSelecionarLotePadrao() {
+        if (!AUTO_SELECIONAR_LOTE_PADRAO) return;
+        if (autoSelecionandoLote) return;
+
+        const lotePadrao = obterLotePadrao();
+
+        if (!lotePadrao) {
+            return;
+        }
+
+        const campoLote = encontrarCampoLote();
+
+        if (!campoLote || !elementoVisivel(campoLote)) {
+            return;
+        }
+
+        const loteAtual = String(campoLote.value || "").trim();
+
+        if (normalizarTexto(loteAtual) === normalizarTexto(lotePadrao)) {
+            return;
+        }
+
+        const agora = Date.now();
+        const chaveTentativa =
+            normalizarTexto(loteAtual) + "->" + normalizarTexto(lotePadrao);
+
+        if (
+            ultimaChaveTentativaAutoLote === chaveTentativa &&
+            agora - ultimaTentativaAutoLote < 8000
+        ) {
+            return;
+        }
+
+        ultimaChaveTentativaAutoLote = chaveTentativa;
+        ultimaTentativaAutoLote = agora;
+
+        const botaoLotes = encontrarBotaoListaLotes(campoLote);
+
+        if (!botaoLotes) {
+            atualizarStatus("Botão de lotes não encontrado.");
+            return;
+        }
+
+        autoSelecionandoLote = true;
+
+        atualizarStatus("Abrindo lista de lotes para selecionar: " + lotePadrao);
+
+        clicarElemento(botaoLotes);
+
+        const selecionou = await esperarESelecionarLote(lotePadrao);
+
+        setTimeout(() => {
+            const campoLoteDepois = encontrarCampoLote();
+            const loteDepois = campoLoteDepois ? campoLoteDepois.value.trim() : "";
+
+            if (normalizarTexto(loteDepois) === normalizarTexto(lotePadrao)) {
+                atualizarStatus("Lote padrão aplicado com sucesso: " + lotePadrao);
+            } else {
+                atualizarStatus("Tentou selecionar o lote, mas o campo ainda está: " + loteDepois);
+            }
+        }, 500);
+    }
+
+    function iniciarAutoLotePadrao() {
+        atualizarPainelLotePadrao();
+        tentarSelecionarLotePadrao();
+    }
+
+    // ==========================================
+    // INICIAR SCRIPT
+    // ==========================================
+
+    function iniciar() {
+        if (!document.body) {
+            setTimeout(iniciar, 100);
+            return;
+        }
+
+        const observerModal = new MutationObserver(() => {
+            processarModalJustificativaLote();
+            iniciarAutoLotePadrao();
+        });
+
+        observerModal.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["style", "class"]
+        });
+
+        setInterval(() => {
+            processarModalJustificativaLote();
+            iniciarAutoLotePadrao();
+        }, 1000);
+
+        atualizarStatus("Monitorando justificativa e lote padrão.");
+    }
+
+    iniciar();
+
+})();
