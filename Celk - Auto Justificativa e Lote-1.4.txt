@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Celk - Auto Justificativa e Lote
+// @name         Celk - Auto Justificativa e Lote por Produto
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  Preenche justificativa automaticamente e tenta selecionar lote padrão
+// @version      1.5
+// @description  Preenche justificativa automaticamente e tenta selecionar lote padrão separado por produto
 // @author       Você
 // @match        https://criciuma.celk.com.br/*
 // @grant        none
@@ -20,9 +20,8 @@
     const AUTO_CONFIRMAR_JUSTIFICATIVA = true;
     const DELAY_CONFIRMAR_MS = 0;
 
-    const CELK_LOTE_PADRAO_KEY = "celk_lote_padrao_global";
-    const CELK_LOTES_SALVOS_KEY = "celk_lotes_salvos_global";
     const AUTO_SELECIONAR_LOTE_PADRAO = true;
+    const CELK_LOTES_POR_PRODUTO_KEY = "celk_lotes_por_produto_v1";
 
     let autoSelecionandoLote = false;
     let ultimaTentativaAutoLote = 0;
@@ -52,7 +51,23 @@
             align-items: center !important;
             gap: 4px !important;
             margin-top: 4px !important;
-            max-width: 280px !important;
+            max-width: 320px !important;
+        }
+
+        .celk-produto-info {
+            font-size: 10px !important;
+            color: #555 !important;
+            width: 100% !important;
+            line-height: 1.2 !important;
+        }
+
+        .celk-produto-erro {
+            font-size: 11px !important;
+            color: #9b1c1c !important;
+            background: #fff0f0 !important;
+            border: 1px solid #d99 !important;
+            padding: 3px 6px !important;
+            border-radius: 4px !important;
         }
 
         .celk-lote-btn {
@@ -270,86 +285,76 @@
     }
 
     // ==========================================
-    // LOTE PADRÃO
+    // IDENTIFICAÇÃO DO PRODUTO
     // ==========================================
 
-    function obterLotePadrao() {
-        return localStorage.getItem(CELK_LOTE_PADRAO_KEY) || "";
-    }
+    function textoValidoProduto(txt) {
+        txt = String(txt || "").trim();
 
-    function definirLotePadrao(lote) {
-        lote = String(lote || "").trim().toUpperCase();
+        if (!txt) return false;
+        if (txt.length < 4) return false;
+        if (/^\d+$/.test(txt)) return false;
+        if (/^\d+[,.]?\d*$/.test(txt)) return false;
+        if (/^\d{2}\/\d{2}\/\d{4}$/.test(txt)) return false;
 
-        if (!lote) {
-            return;
-        }
+        const normalizado = normalizarTexto(txt);
 
-        localStorage.setItem(CELK_LOTE_PADRAO_KEY, lote);
-        adicionarLoteSalvo(lote);
-
-        atualizarStatus("Lote padrão definido: " + lote);
-
-        atualizarPainelLotePadrao();
-    }
-
-    function obterLotesSalvos() {
-        try {
-            const raw = localStorage.getItem(CELK_LOTES_SALVOS_KEY);
-            const lista = JSON.parse(raw || "[]");
-
-            if (!Array.isArray(lista)) {
-                return [];
-            }
-
-            return lista
-                .map(lote => String(lote || "").trim().toUpperCase())
-                .filter(Boolean);
-        } catch (e) {
-            return [];
-        }
-    }
-
-    function salvarLotesSalvos(lista) {
-        const limpa = [
-            ...new Set(
-                lista
-                    .map(lote => String(lote || "").trim().toUpperCase())
-                    .filter(Boolean)
-            )
+        const termosInvalidos = [
+            "LOTE",
+            "LOTES",
+            "ESTOQUE",
+            "VALIDADE",
+            "DT VALIDADE",
+            "DT. VALIDADE",
+            "FISICO",
+            "FÍSICO",
+            "RESERVADO",
+            "DISPONIVEL",
+            "DISPONÍVEL",
+            "FABRICANTE",
+            "PADRAO",
+            "PADRÃO",
+            "FECHAR",
+            "CONFIRMAR",
+            "JUSTIFICATIVA",
+            "ERRO DE ESTOQUE"
         ];
 
-        localStorage.setItem(CELK_LOTES_SALVOS_KEY, JSON.stringify(limpa));
+        if (termosInvalidos.includes(normalizado)) {
+            return false;
+        }
+
+        return true;
     }
 
-    function adicionarLoteSalvo(lote) {
-        lote = String(lote || "").trim().toUpperCase();
-
-        if (!lote) {
-            return;
-        }
-
-        const lista = obterLotesSalvos();
-
-        if (!lista.includes(lote)) {
-            lista.push(lote);
-            salvarLotesSalvos(lista);
-        }
+    function limparTextoProduto(txt) {
+        return String(txt || "")
+            .replace(/\s+/g, " ")
+            .replace(/^produto\s*[:\-]?\s*/i, "")
+            .replace(/^medicamento\s*[:\-]?\s*/i, "")
+            .replace(/^material\s*[:\-]?\s*/i, "")
+            .replace(/^insumo\s*[:\-]?\s*/i, "")
+            .replace(/^item\s*[:\-]?\s*/i, "")
+            .trim();
     }
 
-    function removerLoteSalvo(lote) {
-        lote = String(lote || "").trim().toUpperCase();
+    function gerarChaveProduto(nomeProduto) {
+        return normalizarTexto(nomeProduto)
+            .replace(/[^A-Z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "")
+            .slice(0, 120);
+    }
 
-        const lista = obterLotesSalvos().filter(item => item !== lote);
+    function obterValorCampo(el) {
+        if (!el) return "";
 
-        salvarLotesSalvos(lista);
+        const tag = el.tagName;
 
-        if (normalizarTexto(obterLotePadrao()) === normalizarTexto(lote)) {
-            localStorage.removeItem(CELK_LOTE_PADRAO_KEY);
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+            return String(el.value || el.textContent || "").trim();
         }
 
-        atualizarStatus("Lote removido: " + lote);
-
-        atualizarPainelLotePadrao();
+        return String(el.textContent || "").trim();
     }
 
     function encontrarCampoLote() {
@@ -358,6 +363,340 @@
             'input[name*="pnlSaidaLote:lote"]'
         );
     }
+
+    function encontrarRaizFormulario(campoLote) {
+        return (
+            campoLote?.closest("form") ||
+            campoLote?.closest(".wicket-modal") ||
+            campoLote?.closest('[role="dialog"]') ||
+            document.body
+        );
+    }
+
+    function campoPareceProduto(el) {
+        if (!el) return false;
+
+        const alvo = normalizarTexto(
+            (el.name || "") + " " +
+            (el.id || "") + " " +
+            (el.getAttribute("wicketpath") || "") + " " +
+            (el.className || "")
+        );
+
+        if (
+            alvo.includes("LOTE") ||
+            alvo.includes("QTD") ||
+            alvo.includes("QUANTIDADE") ||
+            alvo.includes("ESTOQUE") ||
+            alvo.includes("VALIDADE") ||
+            alvo.includes("JUSTIFIC")
+        ) {
+            return false;
+        }
+
+        return (
+            alvo.includes("PRODUTO") ||
+            alvo.includes("MEDICAMENTO") ||
+            alvo.includes("MATERIAL") ||
+            alvo.includes("INSUMO") ||
+            alvo.includes("ITEM") ||
+            alvo.includes("DESCRICAO") ||
+            alvo.includes("DESCRIÇÃO") ||
+            alvo.includes("MATMED")
+        );
+    }
+
+    function procurarProdutoPorSeletores(raiz) {
+        const seletores = [
+            'input[name*="produto"]',
+            'input[wicketpath*="produto"]',
+            'input[name*="medicamento"]',
+            'input[wicketpath*="medicamento"]',
+            'input[name*="material"]',
+            'input[wicketpath*="material"]',
+            'input[name*="insumo"]',
+            'input[wicketpath*="insumo"]',
+            'input[name*="item"]',
+            'input[wicketpath*="item"]',
+            'input[name*="descricao"]',
+            'input[wicketpath*="descricao"]',
+            'input[name*="matmed"]',
+            'input[wicketpath*="matmed"]',
+            'textarea[name*="produto"]',
+            'textarea[wicketpath*="produto"]',
+            'textarea[name*="medicamento"]',
+            'textarea[wicketpath*="medicamento"]',
+            'textarea[name*="material"]',
+            'textarea[wicketpath*="material"]',
+            '.token-input-token-celk',
+            '.token-input-token'
+        ];
+
+        const candidatos = [
+            ...raiz.querySelectorAll(seletores.join(","))
+        ];
+
+        for (const el of candidatos) {
+            if (!elementoVisivel(el)) continue;
+
+            const valor = limparTextoProduto(obterValorCampo(el));
+
+            if (textoValidoProduto(valor)) {
+                return valor;
+            }
+        }
+
+        return "";
+    }
+
+    function procurarProdutoPorLabel(raiz) {
+        const labels = [...raiz.querySelectorAll("label")];
+
+        const palavrasProduto = [
+            "PRODUTO",
+            "MEDICAMENTO",
+            "MATERIAL",
+            "INSUMO",
+            "ITEM",
+            "DESCRICAO",
+            "DESCRIÇÃO",
+            "MATMED"
+        ];
+
+        for (const label of labels) {
+            const textoLabel = normalizarTexto(label.textContent);
+
+            const ehLabelProduto = palavrasProduto.some(palavra => {
+                return textoLabel.includes(normalizarTexto(palavra));
+            });
+
+            if (!ehLabelProduto) continue;
+            if (textoLabel.includes("LOTE")) continue;
+
+            const container =
+                label.closest(".field") ||
+                label.closest(".span-horizontal") ||
+                label.closest(".span-6") ||
+                label.closest(".span-8") ||
+                label.closest(".span-10") ||
+                label.parentElement;
+
+            if (!container) continue;
+
+            const campos = [
+                ...container.querySelectorAll(
+                    "input, textarea, select, .token-input-token-celk, .token-input-token"
+                )
+            ];
+
+            for (const campo of campos) {
+                if (!elementoVisivel(campo)) continue;
+
+                const valor = limparTextoProduto(obterValorCampo(campo));
+
+                if (textoValidoProduto(valor)) {
+                    return valor;
+                }
+            }
+
+            const textoContainer = limparTextoProduto(container.textContent || "");
+
+            if (textoValidoProduto(textoContainer)) {
+                return textoContainer;
+            }
+        }
+
+        return "";
+    }
+
+    function procurarProdutoPorCamposProvaveis(raiz) {
+        const campos = [
+            ...raiz.querySelectorAll("input, textarea, select, span, div")
+        ];
+
+        for (const campo of campos) {
+            if (!elementoVisivel(campo)) continue;
+            if (!campoPareceProduto(campo)) continue;
+
+            const valor = limparTextoProduto(obterValorCampo(campo));
+
+            if (textoValidoProduto(valor)) {
+                return valor;
+            }
+        }
+
+        return "";
+    }
+
+    function obterProdutoAtual(campoLote) {
+        const raiz = encontrarRaizFormulario(campoLote);
+
+        let nomeProduto =
+            procurarProdutoPorSeletores(raiz) ||
+            procurarProdutoPorLabel(raiz) ||
+            procurarProdutoPorCamposProvaveis(raiz);
+
+        nomeProduto = limparTextoProduto(nomeProduto);
+
+        if (!textoValidoProduto(nomeProduto)) {
+            return null;
+        }
+
+        const chave = gerarChaveProduto(nomeProduto);
+
+        if (!chave) {
+            return null;
+        }
+
+        return {
+            nome: nomeProduto,
+            chave
+        };
+    }
+
+    // ==========================================
+    // STORAGE POR PRODUTO
+    // ==========================================
+
+    function obterMapaLotesPorProduto() {
+        try {
+            const raw = localStorage.getItem(CELK_LOTES_POR_PRODUTO_KEY);
+            const mapa = JSON.parse(raw || "{}");
+
+            if (!mapa || typeof mapa !== "object" || Array.isArray(mapa)) {
+                return {};
+            }
+
+            return mapa;
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function salvarMapaLotesPorProduto(mapa) {
+        localStorage.setItem(CELK_LOTES_POR_PRODUTO_KEY, JSON.stringify(mapa));
+    }
+
+    function obterRegistroProduto(produto) {
+        if (!produto || !produto.chave) {
+            return {
+                nome: "",
+                padrao: "",
+                lotes: []
+            };
+        }
+
+        const mapa = obterMapaLotesPorProduto();
+
+        const registro = mapa[produto.chave] || {
+            nome: produto.nome,
+            padrao: "",
+            lotes: []
+        };
+
+        if (!Array.isArray(registro.lotes)) {
+            registro.lotes = [];
+        }
+
+        registro.nome = produto.nome || registro.nome || "";
+        registro.padrao = String(registro.padrao || "").trim().toUpperCase();
+
+        registro.lotes = [
+            ...new Set(
+                registro.lotes
+                    .map(lote => String(lote || "").trim().toUpperCase())
+                    .filter(Boolean)
+            )
+        ];
+
+        return registro;
+    }
+
+    function salvarRegistroProduto(produto, registro) {
+        if (!produto || !produto.chave) {
+            return;
+        }
+
+        const mapa = obterMapaLotesPorProduto();
+
+        registro.nome = produto.nome || registro.nome || "";
+        registro.padrao = String(registro.padrao || "").trim().toUpperCase();
+
+        registro.lotes = [
+            ...new Set(
+                (registro.lotes || [])
+                    .map(lote => String(lote || "").trim().toUpperCase())
+                    .filter(Boolean)
+            )
+        ];
+
+        mapa[produto.chave] = registro;
+
+        salvarMapaLotesPorProduto(mapa);
+    }
+
+    function obterLotePadrao(produto) {
+        const registro = obterRegistroProduto(produto);
+        return registro.padrao || "";
+    }
+
+    function obterLotesSalvos(produto) {
+        const registro = obterRegistroProduto(produto);
+        return registro.lotes || [];
+    }
+
+    function definirLotePadrao(lote, produto) {
+        lote = String(lote || "").trim().toUpperCase();
+
+        if (!lote) {
+            return;
+        }
+
+        if (!produto || !produto.chave) {
+            atualizarStatus("Produto não identificado. Lote não foi salvo.");
+            return;
+        }
+
+        const registro = obterRegistroProduto(produto);
+
+        registro.padrao = lote;
+
+        if (!registro.lotes.includes(lote)) {
+            registro.lotes.unshift(lote);
+        }
+
+        salvarRegistroProduto(produto, registro);
+
+        atualizarStatus("Lote padrão definido para [" + produto.nome + "]: " + lote);
+
+        atualizarPainelLotePadrao();
+    }
+
+    function removerLoteSalvo(lote, produto) {
+        lote = String(lote || "").trim().toUpperCase();
+
+        if (!produto || !produto.chave) {
+            return;
+        }
+
+        const registro = obterRegistroProduto(produto);
+
+        registro.lotes = registro.lotes.filter(item => item !== lote);
+
+        if (normalizarTexto(registro.padrao) === normalizarTexto(lote)) {
+            registro.padrao = "";
+        }
+
+        salvarRegistroProduto(produto, registro);
+
+        atualizarStatus("Lote removido de [" + produto.nome + "]: " + lote);
+
+        atualizarPainelLotePadrao();
+    }
+
+    // ==========================================
+    // PAINEL DE LOTE
+    // ==========================================
 
     function encontrarBotaoListaLotes(campoLote) {
         const container =
@@ -373,12 +712,15 @@
         );
     }
 
-    function criarBotaoLote(lote, ativo) {
+    function criarBotaoLote(lote, ativo, produto) {
         const btn = document.createElement("button");
 
         btn.type = "button";
         btn.textContent = lote;
-        btn.title = "Usar lote " + lote + " como padrão";
+        btn.title = produto
+            ? "Usar lote " + lote + " como padrão para " + produto.nome
+            : "Usar lote " + lote + " como padrão";
+
         btn.className = "celk-lote-btn";
 
         if (ativo) {
@@ -386,23 +728,23 @@
         }
 
         btn.addEventListener("click", () => {
-            definirLotePadrao(lote);
+            definirLotePadrao(lote, produto);
         });
 
         return btn;
     }
 
-    function criarBotaoRemoverLote(lote) {
+    function criarBotaoRemoverLote(lote, produto) {
         const btn = document.createElement("button");
 
         btn.type = "button";
         btn.textContent = "×";
-        btn.title = "Remover lote padrão/salvo";
+        btn.title = "Remover lote salvo deste produto";
         btn.className = "celk-lote-remover";
 
         btn.addEventListener("click", event => {
             event.stopPropagation();
-            removerLoteSalvo(lote);
+            removerLoteSalvo(lote, produto);
         });
 
         return btn;
@@ -432,18 +774,41 @@
         }
 
         const loteAtual = String(campoLote.value || "").trim().toUpperCase();
-        const lotePadrao = obterLotePadrao();
+        const produto = obterProdutoAtual(campoLote);
 
-        const lotes = obterLotesSalvos();
+        if (!produto) {
+            const chaveRenderErro = "produto-nao-identificado-" + loteAtual;
 
-        if (loteAtual && !lotes.includes(loteAtual)) {
-            lotes.unshift(loteAtual);
+            if (box.dataset.renderKey === chaveRenderErro) {
+                return;
+            }
+
+            box.dataset.renderKey = chaveRenderErro;
+            box.innerHTML = "";
+
+            const aviso = document.createElement("span");
+            aviso.textContent = "Produto não identificado";
+            aviso.className = "celk-produto-erro";
+
+            box.appendChild(aviso);
+
+            return;
+        }
+
+        const lotePadrao = obterLotePadrao(produto);
+        const lotesSalvos = obterLotesSalvos(produto);
+
+        const lotesParaExibir = [...lotesSalvos];
+
+        if (loteAtual && !lotesParaExibir.includes(loteAtual)) {
+            lotesParaExibir.unshift(loteAtual);
         }
 
         const chaveRender = JSON.stringify({
+            produto: produto.chave,
             loteAtual,
             lotePadrao,
-            lotes
+            lotes: lotesParaExibir
         });
 
         if (box.dataset.renderKey === chaveRender) {
@@ -453,18 +818,25 @@
         box.dataset.renderKey = chaveRender;
         box.innerHTML = "";
 
-        if (lotes.length === 0) {
+        const infoProduto = document.createElement("span");
+        infoProduto.className = "celk-produto-info";
+        infoProduto.textContent = "Produto: " + produto.nome.slice(0, 45);
+        infoProduto.title = produto.nome;
+
+        box.appendChild(infoProduto);
+
+        if (lotesParaExibir.length === 0) {
             return;
         }
 
-        for (const lote of lotes) {
+        for (const lote of lotesParaExibir) {
             const ativo = normalizarTexto(lote) === normalizarTexto(lotePadrao);
 
-            const btnLote = criarBotaoLote(lote, ativo);
+            const btnLote = criarBotaoLote(lote, ativo, produto);
             box.appendChild(btnLote);
 
             if (ativo) {
-                const btnRemover = criarBotaoRemoverLote(lote);
+                const btnRemover = criarBotaoRemoverLote(lote, produto);
                 box.appendChild(btnRemover);
             }
         }
@@ -531,16 +903,15 @@
         return null;
     }
 
-
     function selecionarLinhaDeLote(linha) {
         if (!linha) {
             return false;
         }
 
         const primeiraCelula =
-              linha.querySelector("td:first-child div") ||
-              linha.querySelector("td:first-child") ||
-              linha;
+            linha.querySelector("td:first-child div") ||
+            linha.querySelector("td:first-child") ||
+            linha;
 
         const opts = {
             bubbles: true,
@@ -619,15 +990,21 @@
         if (!AUTO_SELECIONAR_LOTE_PADRAO) return;
         if (autoSelecionandoLote) return;
 
-        const lotePadrao = obterLotePadrao();
-
-        if (!lotePadrao) {
-            return;
-        }
-
         const campoLote = encontrarCampoLote();
 
         if (!campoLote || !elementoVisivel(campoLote)) {
+            return;
+        }
+
+        const produto = obterProdutoAtual(campoLote);
+
+        if (!produto) {
+            return;
+        }
+
+        const lotePadrao = obterLotePadrao(produto);
+
+        if (!lotePadrao) {
             return;
         }
 
@@ -637,9 +1014,16 @@
             return;
         }
 
+        if (encontrarModalLotesAberto()) {
+            return;
+        }
+
         const agora = Date.now();
+
         const chaveTentativa =
-            normalizarTexto(loteAtual) + "->" + normalizarTexto(lotePadrao);
+            produto.chave + "|" +
+            normalizarTexto(loteAtual) + "->" +
+            normalizarTexto(lotePadrao);
 
         if (
             ultimaChaveTentativaAutoLote === chaveTentativa &&
@@ -660,22 +1044,34 @@
 
         autoSelecionandoLote = true;
 
-        atualizarStatus("Abrindo lista de lotes para selecionar: " + lotePadrao);
+        try {
+            atualizarStatus("Abrindo lista de lotes para [" + produto.nome + "]: " + lotePadrao);
 
-        clicarElemento(botaoLotes);
+            clicarElemento(botaoLotes);
 
-        const selecionou = await esperarESelecionarLote(lotePadrao);
+            const selecionou = await esperarESelecionarLote(lotePadrao);
 
-        setTimeout(() => {
-            const campoLoteDepois = encontrarCampoLote();
-            const loteDepois = campoLoteDepois ? campoLoteDepois.value.trim() : "";
-
-            if (normalizarTexto(loteDepois) === normalizarTexto(lotePadrao)) {
-                atualizarStatus("Lote padrão aplicado com sucesso: " + lotePadrao);
-            } else {
-                atualizarStatus("Tentou selecionar o lote, mas o campo ainda está: " + loteDepois);
+            if (selecionou) {
+                atualizarStatus("Tentativa de seleção do lote concluída.");
             }
-        }, 500);
+
+            setTimeout(() => {
+                const campoLoteDepois = encontrarCampoLote();
+                const loteDepois = campoLoteDepois ? campoLoteDepois.value.trim() : "";
+
+                if (normalizarTexto(loteDepois) === normalizarTexto(lotePadrao)) {
+                    atualizarStatus("Lote aplicado para [" + produto.nome + "]: " + lotePadrao);
+                } else {
+                    atualizarStatus("Tentou selecionar o lote, mas o campo ainda está: " + loteDepois);
+                }
+
+                atualizarPainelLotePadrao();
+            }, 500);
+        } finally {
+            setTimeout(() => {
+                autoSelecionandoLote = false;
+            }, 1500);
+        }
     }
 
     function iniciarAutoLotePadrao() {
@@ -710,7 +1106,7 @@
             iniciarAutoLotePadrao();
         }, 1000);
 
-        atualizarStatus("Monitorando justificativa e lote padrão.");
+        atualizarStatus("Monitorando justificativa e lote padrão por produto.");
     }
 
     iniciar();
